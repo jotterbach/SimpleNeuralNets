@@ -16,9 +16,12 @@ class MDN(object):
                  n_hidden,
                  dimension_target_variable,
                  number_of_components,
-                 hid_activations):
+                 hid_activations,
+                 **kwargs):
         if not isinstance(input_vector.__class__, theano.tensor.TensorVariable.__class__):
             raise AssertionError("input_vector needs to be of type 'theano.tensor.TensorVariable'")
+
+        self.normalized_gradient = kwargs.get('normalized_gradient', False)
 
         self.input_vector = input_vector
         self.target_vector = target_vector
@@ -74,31 +77,41 @@ class MDN(object):
         return self.predict_mu(input_values), self.predict_sigma(input_values), self.predict_mix(input_values)
 
     def print_network_graph(self):
-        theano.printing.pydotprint(self.predict,
+        theano.printing.pydotprint(self.predict_params,
                                    var_with_name_simple=True,
                                    compact=True,
                                    outfile='nn-theano-forward_prop.png',
                                    format='png')
 
-    def logsum_loss(self, n_samples, regularization_strength):
+    def logsum_loss(self, n_samples, l1_regularization_strength, l2_regularization_strength):
         log_sum_loss = -tensor.sum(tensor.log(
                             tensor.sum(self.mix * tensor.inv(np.sqrt(2 * np.pi) * self.sigma) *
                                        tensor.exp(tensor.neg(tensor.sqr(self.mu - self.target_vector)) *
                                                   tensor.inv(2 * tensor.sqr(self.sigma))), axis=0)
         ))
 
-        reg_loss = tensor.sum(tensor.sqr(self.layers.values()[0].W))
+        l1_reg_loss = tensor.sum(np.abs(self.layers.values()[0].W))
         for layer in self.layers.values()[1:]:
-            reg_loss += tensor.sum(tensor.sqr(layer.W))
+            l1_reg_loss += tensor.sum(np.abs(layer.W))
 
-        regularization = 1/n_samples * regularization_strength/2 * reg_loss
+        l2_reg_loss = tensor.sum(tensor.sqr(self.layers.values()[0].W))
+        for layer in self.layers.values()[1:]:
+            l2_reg_loss += tensor.sum(tensor.sqr(layer.W))
 
-        return log_sum_loss + regularization
+        l1_regularization = 1/n_samples * l1_regularization_strength/2 * l1_reg_loss
 
-    def compute_param_updates(self, n_samples, regularization_strength, lr):
+        l2_regularization = 1/n_samples * l2_regularization_strength/2 * l2_reg_loss
+
+        return log_sum_loss + l1_regularization + l2_regularization
+
+    def compute_param_updates(self, n_samples, l1_regularization_strength, l2_regularization_strength, lr):
         gparams = []
         for param in self.params:
-            gparam = tensor.grad(self.logsum_loss(n_samples, regularization_strength), param)
+            gparam = tensor.grad(self.logsum_loss(n_samples, l1_regularization_strength, l2_regularization_strength), param)
+
+            if self.normalized_gradient:
+                gparam = gparam / tensor.sqrt(tensor.sum(tensor.sqr(gparam)))
+
             gparams.append(gparam)
 
         updates = []
@@ -107,35 +120,54 @@ class MDN(object):
 
         return updates
 
-    def get_gradient(self, n_samples, regularization_strength, lr):
+    def get_gradient(self, n_samples, l1_regularization_strength, l2_regularization_strength, lr):
         return theano.function([self.input_vector, self.target_vector],
-                               self.logsum_loss(n_samples, regularization_strength),
-                               updates=tuple(self.compute_param_updates(n_samples, regularization_strength, lr)))
+                               self.logsum_loss(n_samples, l1_regularization_strength, l2_regularization_strength),
+                               updates=tuple(self.compute_param_updates(n_samples, l1_regularization_strength, l2_regularization_strength, lr)))
 
-    def train(self, input_values, target_values, regularization_strength, learning_rate, n_iteartions=10000, print_loss=False):
-        gradient_step = self.get_gradient(input_values.shape[0], regularization_strength, learning_rate)
-        calculate_loss = theano.function([self.input_vector, self.target_vector], self.logsum_loss(input_values.shape[0], regularization_strength))
+    def train(self, input_values, target_values, test_input=None, test_target=None, **kwargs):
 
+        n_iterations = kwargs.get('n_iterations', 10000)
+        print_loss = kwargs.get('print_loss', False)
+        learning_rate = kwargs.get('learning_rate', 0.01)
+        l1_regularization_strength = kwargs.get('l1_strength', 0.0)
+        l2_regularization_strength = kwargs.get('l2_strength', 0.0)
+        sigma_weight_init = kwargs.get('sigma_weight_init', 1.0)
+        bias_weight_init = kwargs.get('sigma_bias_init', 0.0)
+
+        gradient_step = self.get_gradient(input_values.shape[0], l1_regularization_strength, l2_regularization_strength, learning_rate)
+
+        calculate_loss = theano.function([self.input_vector, self.target_vector], self.logsum_loss(input_values.shape[0], l1_regularization_strength, l2_regularization_strength))
         calculate_sigma = theano.function([self.input_vector], self.sigma)
         calculate_mu = theano.function([self.input_vector], self.mu)
+        calculate_mix = theano.function([self.input_vector], self.mix)
+
+        losses = []
+        test_losses = []
 
         # reinitialize weights
         for layer in self.layers.values():
-            layer.W.set_value(rd.randn(layer.n_in, layer.n_out) / (layer.n_in + layer.n_out))
-            layer.b.set_value(np.zeros(layer.n_out) / (layer.n_in + layer.n_out))
+            layer.W.set_value(sigma_weight_init * rd.randn(layer.n_in, layer.n_out) + bias_weight_init)
+            layer.b.set_value(np.zeros(layer.n_out))
 
-        for i in xrange(0, n_iteartions):
+        for i in xrange(0, n_iterations):
             # This will update our parameters W2, b2, W1 and b1!
             grad_step = gradient_step(input_values, target_values)
+            losses.append(calculate_loss(input_values, target_values))
+            if test_input is not None:
+                test_losses.append(calculate_loss(test_input, test_target))
 
             # Optionally print the loss.
             # This is expensive because it uses the whole dataset, so we don't want to do it too often.
             if print_loss and i % 1000 == 0:
                 print "Loss after iteration %i: %f" % (i, calculate_loss(input_values, target_values))
-                print "Sigma after iteration " + str(i) + ": ", calculate_sigma(input_values).min(), calculate_sigma(input_values).max()
-                print "Mu after iteration " + str(i) + ": ", calculate_mu(input_values).min(), calculate_mu(input_values).max()
+                print "Sigma after iteration " + str(i) + ": ", calculate_sigma(input_values).min(axis=1), calculate_sigma(input_values).max(axis=1)
+                print "Mu after iteration " + str(i) + ": ", calculate_mu(input_values).min(axis=1), calculate_mu(input_values).max(axis=1)
+                print "mix after iteration " + str(i) + ": ", calculate_mix(input_values).min(axis=1), calculate_mix(input_values).max(axis=1)
                 print "gradient after iteration " + str(i) + ": ", learning_rate * grad_step
                 print "\n\n"
+
+        return losses, test_losses
 
     def _gaussian(self, x, mu, sigma):
         return np.exp(-np.power(x - mu, 2)/(2 * np.power(sigma, 2))) / np.sqrt(2 * np.pi * np.power(sigma, 2))

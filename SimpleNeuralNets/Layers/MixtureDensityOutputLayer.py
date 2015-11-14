@@ -19,7 +19,7 @@ class MixtureDensityOutputLayer(object):
         self.W = W
 
         if b is None:
-            b = theano.shared(np.zeros(self.n_out) / (n_in + self.n_out), name="b" + str(layer_idx), borrow=True)
+            b = theano.shared(np.zeros(self.n_out), name="b" + str(layer_idx), borrow=True)
         self.b = b
 
         lin_output = tensor.transpose(tensor.dot(input_vector, self.W) + self.b)
