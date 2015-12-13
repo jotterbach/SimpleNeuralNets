@@ -112,6 +112,9 @@ class FFNN():
         gradient_step = self.get_gradient(input_values.shape[0],  l1_regularization_strength, l2_regularization_strength, learning_rate)
         calculate_loss = theano.function([self.input_vector, self.target_vector], self.loss_function(input_values.shape[0],  l1_regularization_strength, l2_regularization_strength))
 
+        if test_input is not None:
+            calculate_test_loss = theano.function([self.input_vector, self.target_vector], self.loss_function(test_input.shape[0],  l1_regularization_strength, l2_regularization_strength))
+
         losses = []
         test_losses = []
 
@@ -125,7 +128,7 @@ class FFNN():
             grad_step = gradient_step(input_values, target_values)
             losses.append(calculate_loss(input_values, target_values))
             if test_input is not None:
-                test_losses.append(calculate_loss(test_input, test_target))
+                test_losses.append(calculate_test_loss(test_input, test_target))
 
             # Optionally print the loss.
             # This is expensive because it uses the whole dataset, so we don't want to do it too often.

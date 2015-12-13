@@ -1,6 +1,5 @@
 .idea/
 .ipynb_checkpoints/
-*.ipynb
 tests/
 
 # Byte-compiled / optimized / DLL files
